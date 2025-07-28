@@ -843,21 +843,63 @@ def sidebar_controls():
             except Exception as e:
                 st.sidebar.error(f"❌ Error: {str(e)}")
     
-    # Filter controls
+    # # Filter controls
+    # st.sidebar.divider()
+    # st.sidebar.header("🎯 Filters & Search")
+    
+    # search_text = st.sidebar.text_input("🔍 Search", placeholder="Search in all columns...")
+    # similarity_range = st.sidebar.slider("Similarity %", min_value=1, max_value=100, value=(1, 100))
+    
+    # filter_column = st.sidebar.selectbox(
+    #     "Filter Column",
+    #     ["None", "Categoria", "Variedad", "Color", "Grado", "Catalog ID"]
+    # )
+    
+    # filter_value = ""
+    # if filter_column != "None":
+    #     filter_value = st.sidebar.text_input("Filter Value", placeholder="Value to exclude...")
+    
+    # Divider y encabezado
     st.sidebar.divider()
     st.sidebar.header("🎯 Filters & Search")
-    
-    search_text = st.sidebar.text_input("🔍 Search", placeholder="Search in all columns...")
-    similarity_range = st.sidebar.slider("Similarity %", min_value=1, max_value=100, value=(1, 100))
-    
+
+    # Search text
+    search_text = st.sidebar.text_input(
+        "🔍 Search",
+        value=st.session_state.get("search_text", ""),
+        placeholder="Search in all columns..."
+    )
+    st.session_state.search_text = search_text
+
+    # Similarity slider
+    similarity_range = st.sidebar.slider(
+        "Similarity %",
+        min_value=1,
+        max_value=100,
+        value=st.session_state.get("similarity_range", (1, 100))
+    )
+    st.session_state.similarity_range = similarity_range
+
+    # Filter column
     filter_column = st.sidebar.selectbox(
         "Filter Column",
-        ["None", "Categoria", "Variedad", "Color", "Grado", "Catalog ID"]
+        ["None", "Categoria", "Variedad", "Color", "Grado", "Catalog ID"],
+        index=st.session_state.get("filter_column_index", 0)
     )
-    
+    st.session_state.filter_column = filter_column
+    st.session_state.filter_column_index = ["None", "Categoria", "Variedad", "Color", "Grado", "Catalog ID"].index(filter_column)
+
+    # Filter value
     filter_value = ""
     if filter_column != "None":
-        filter_value = st.sidebar.text_input("Filter Value", placeholder="Value to exclude...")
+        filter_value = st.sidebar.text_input(
+            "Filter Value",
+            value=st.session_state.get("filter_value", ""),
+            placeholder="Value to exclude..."
+        )
+        st.session_state.filter_value = filter_value
+    else:
+        st.session_state.filter_value = ""
     
     # Theme toggle
     st.sidebar.divider()
