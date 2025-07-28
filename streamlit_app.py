@@ -1,4 +1,4 @@
-# Updated streamlit_app.py with inline action integration
+# Updated streamlit_app.py with bulk actions and sorting
 
 import streamlit as st
 import pandas as pd
@@ -50,7 +50,12 @@ def initialize_session_state():
         'edit_variedad': '',
         'edit_color': '',
         'edit_grado': '',
-        'current_page': 1
+        'current_page': 1,
+        'search_text': '',
+        'similarity_range': (1, 100),
+        'filter_column': 'None',
+        'filter_column_index': 0,
+        'filter_value': ''
     }
     
     for var, default_value in session_vars.items():
@@ -92,6 +97,20 @@ def insert_single_row_to_database_app(row_data, row_index):
             
     except Exception as e:
         return False, f"Error inserting row: {str(e)}"
+
+def mark_all_accept(filtered_df):
+    """Mark all visible rows as Accept and clear Deny"""
+    for idx in filtered_df.index:
+        st.session_state.form_data[f"accept_{idx}"] = True
+        st.session_state.form_data[f"deny_{idx}"] = False
+    st.session_state["bulk_action_message"] = f"✅ Marked {len(filtered_df)} rows as Accept"
+
+def mark_all_deny(filtered_df):
+    """Mark all visible rows as Deny and clear Accept"""
+    for idx in filtered_df.index:
+        st.session_state.form_data[f"accept_{idx}"] = False
+        st.session_state.form_data[f"deny_{idx}"] = True
+    st.session_state["bulk_action_message"] = f"❌ Marked {len(filtered_df)} rows as Deny"
 
 def apply_custom_css():
     """Apply comprehensive custom styling"""
@@ -236,6 +255,24 @@ def apply_custom_css():
         box-shadow: 0 4px 12px rgba(0,0,0,0.2);
     }}
     
+    /* Bulk action buttons styling */
+    .bulk-action-container {{
+        background: linear-gradient(135deg, #f1f3f4, #e8eaed);
+        border: 2px solid #1976d2;
+        border-radius: 12px;
+        padding: 20px;
+        margin: 20px 0;
+        box-shadow: 0 4px 12px rgba(25, 118, 210, 0.15);
+    }}
+    
+    .bulk-action-header {{
+        text-align: center;
+        color: #1976d2;
+        font-weight: bold;
+        margin-bottom: 15px;
+        font-size: 1.1em;
+    }}
+    
     /* Highlight cells */
     .highlight-cell {{
         background: linear-gradient(135deg, #fffec6, #fff9c4) !important;
@@ -293,6 +330,11 @@ def apply_custom_css():
         .edit-modal-container {{
             padding: 15px;
             margin: 10px 0;
+        }}
+        
+        .bulk-action-container {{
+            padding: 15px;
+            margin: 15px 0;
         }}
     }}
     </style>
@@ -408,14 +450,15 @@ def create_edit_modal():
         similarity = row_data.get('Similarity %', 'N/A')
         missing = row_data.get('Missing Words', '')
         st.info(f"**Missing Words:** {missing}")
-        # Mostrar sinónimos aplicados durante el procesamiento
+        
+        # Show applied synonyms during processing
         applied_synonyms = row_data.get("Applied Synonyms", "")
         if applied_synonyms:
             st.success(f"🔁 **Synonyms applied:** {applied_synonyms}")
         else:
             st.info("No synonyms were applied.")
 
-        # Mostrar blacklist eliminadas durante el procesamiento
+        # Show blacklist removed during processing
         removed_blacklist = row_data.get("Removed Blacklist Words", "")
         if removed_blacklist:
             st.warning(f"🛑 **Blacklist words removed:** {removed_blacklist}")
@@ -479,8 +522,7 @@ def create_edit_modal():
         st.session_state.edit_color = color
         st.session_state.edit_grado = grado
         
-        # Action buttons
-        # Selector de acción: blacklist o synonym
+        # Word Action section
         st.markdown("**🛠️ Word Action (Blacklist / Synonym)**")
 
         action = st.selectbox(
@@ -490,7 +532,7 @@ def create_edit_modal():
             key="modal_action_select"
         )
 
-        # Campos dinámicos según la acción seleccionada
+        # Dynamic fields based on selected action
         word_input_1 = ""
         word_input_2 = ""
 
@@ -530,7 +572,8 @@ def create_edit_modal():
                     'color': color,
                     'grado': grado
                 }
-                # Obtener datos del select y campos de palabra
+                
+                # Get action data
                 action = st.session_state.get("modal_action_select", "")
                 if action == "blacklist":
                     word_final = st.session_state.get("modal_word_blacklist", "").strip()
@@ -541,7 +584,7 @@ def create_edit_modal():
                 else:
                     word_final = ""
 
-                # Agregar a datos actualizados
+                # Add to updated data
                 updated_data["action"] = action
                 updated_data["word"] = word_final
                 
@@ -679,15 +722,14 @@ def create_streamlit_table_with_actions(df):
         # Accept checkbox
         with row_cols[8]:
             accept_key = f"accept_{idx}"
-            # Usa valor de BD por defecto, si no está en session_state
+            # Use database value by default if not in session_state
             db_accept = str(row.get("Accept Map", "")).strip().lower() == "true"
             accept = st.session_state.form_data.get(accept_key, db_accept)
             st.session_state.form_data[accept_key] = st.checkbox("", value=accept, key=f"accept_cb_inline_{idx}")
 
-            # Exclusividad: si se marca accept, desmarcar deny
+            # Exclusivity: if accept is marked, unmark deny
             if st.session_state.form_data[accept_key]:
                 st.session_state.form_data[f"deny_{idx}"] = False
-            
         
         # Deny checkbox
         with row_cols[9]:
@@ -696,43 +738,42 @@ def create_streamlit_table_with_actions(df):
             deny = st.session_state.form_data.get(deny_key, db_deny)
             st.session_state.form_data[deny_key] = st.checkbox("", value=deny, key=f"deny_cb_inline_{idx}")
 
-            # Exclusividad: si se marca deny, desmarcar accept
+            # Exclusivity: if deny is marked, unmark accept
             if st.session_state.form_data[deny_key]:
                 st.session_state.form_data[f"accept_{idx}"] = False
-
         
         # Action buttons
         with row_cols[10]:
             action_col1, action_col2 = st.columns(2)
             
-        with action_col1:
-            if st.button("📝", key=f"update_mapping_{idx}", help="Update accept/deny in DB"):
-                # Obtener los valores actuales de los checkboxes desde session_state
-                accept = st.session_state.form_data.get(f"accept_{idx}", False)
-                deny = st.session_state.form_data.get(f"deny_{idx}", False)
+            with action_col1:
+                if st.button("📝", key=f"update_mapping_{idx}", help="Update accept/deny in DB"):
+                    # Get current checkbox values from session_state
+                    accept = st.session_state.form_data.get(f"accept_{idx}", False)
+                    deny = st.session_state.form_data.get(f"deny_{idx}", False)
 
-                try:
-                    from database_integration import MappingDatabase
-                    db = MappingDatabase()
-                    if db.connect():
-                        # Verificar si la fila existe en la BD
-                        exists, db_row_id = db.verify_row_exists(row.to_dict())
-                        if exists and db_row_id:
-                            update_data = {
-                                "accept_map": str(accept),
-                                "deny_map": str(deny)
-                            }
-                            success, msg = db.update_single_row(db_row_id, update_data)
-                            if success:
-                                st.session_state["last_mapping_update"] = f"✅ Mapping updated for row {idx}"
+                    try:
+                        from database_integration import MappingDatabase
+                        db = MappingDatabase()
+                        if db.connect():
+                            # Check if row exists in database
+                            exists, db_row_id = db.verify_row_exists(row.to_dict())
+                            if exists and db_row_id:
+                                update_data = {
+                                    "accept_map": str(accept),
+                                    "deny_map": str(deny)
+                                }
+                                success, msg = db.update_single_row(db_row_id, update_data)
+                                if success:
+                                    st.session_state["last_mapping_update"] = f"✅ Mapping updated for row {idx}"
+                                else:
+                                    st.session_state["last_mapping_update"] = f"❌ Failed to update DB for row {idx}"
                             else:
-                                st.session_state["last_mapping_update"] = f"❌ Failed to update DB for row {idx}"
-                        else:
-                            st.session_state["last_mapping_update"] = f"⚠️ Row not found in DB for row {idx}"
-                        db.disconnect()
-                except Exception as e:
-                    st.session_state["last_mapping_update"] = f"❌ Error updating row: {str(e)}"
-                st.rerun()
+                                st.session_state["last_mapping_update"] = f"⚠️ Row not found in DB for row {idx}"
+                            db.disconnect()
+                    except Exception as e:
+                        st.session_state["last_mapping_update"] = f"❌ Error updating row: {str(e)}"
+                    st.rerun()
             
             with action_col2:
                 if st.button("✏️", key=f"edit_inline_{idx}", 
@@ -771,8 +812,46 @@ def create_streamlit_table_with_actions(df):
         # Add a subtle separator between rows
         st.markdown("<hr style='margin: 10px 0; border: 1px solid #eee;'>", unsafe_allow_html=True)
 
-
-
+    # Add bulk action buttons at the bottom
+    st.markdown("---")
+    st.markdown(
+        """
+        <div class="bulk-action-container">
+            <div class="bulk-action-header">⚡ Bulk Actions for Current Page</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    
+    col1, col2, col3 = st.columns([1, 1, 1])
+    
+    with col1:
+        if st.button("✅ Accept All Visible", 
+                     type="primary", 
+                     use_container_width=True, 
+                     key="bulk_accept_btn",
+                     help="Mark all visible rows as Accept and clear Deny"):
+            mark_all_accept(df)
+            st.rerun()
+    
+    with col2:
+        if st.button("❌ Deny All Visible", 
+                     use_container_width=True, 
+                     key="bulk_deny_btn",
+                     help="Mark all visible rows as Deny and clear Accept"):
+            mark_all_deny(df)
+            st.rerun()
+    
+    with col3:
+        if st.button("🔄 Clear All Selections", 
+                     use_container_width=True, 
+                     key="bulk_clear_btn",
+                     help="Clear all Accept and Deny selections"):
+            for idx in df.index:
+                st.session_state.form_data[f"accept_{idx}"] = False
+                st.session_state.form_data[f"deny_{idx}"] = False
+            st.session_state["bulk_action_message"] = f"🔄 Cleared all selections for {len(df)} rows"
+            st.rerun()
 
 def sidebar_controls():
     """Enhanced sidebar with all controls"""
@@ -843,23 +922,7 @@ def sidebar_controls():
             except Exception as e:
                 st.sidebar.error(f"❌ Error: {str(e)}")
     
-    # # Filter controls
-    # st.sidebar.divider()
-    # st.sidebar.header("🎯 Filters & Search")
-    
-    # search_text = st.sidebar.text_input("🔍 Search", placeholder="Search in all columns...")
-    # similarity_range = st.sidebar.slider("Similarity %", min_value=1, max_value=100, value=(1, 100))
-    
-    # filter_column = st.sidebar.selectbox(
-    #     "Filter Column",
-    #     ["None", "Categoria", "Variedad", "Color", "Grado", "Catalog ID"]
-    # )
-    
-    # filter_value = ""
-    # if filter_column != "None":
-    #     filter_value = st.sidebar.text_input("Filter Value", placeholder="Value to exclude...")
-    
-    # Divider y encabezado
+    # Filter controls with persistent state
     st.sidebar.divider()
     st.sidebar.header("🎯 Filters & Search")
 
@@ -910,7 +973,7 @@ def sidebar_controls():
     return search_text, similarity_range[0], similarity_range[1], filter_column, filter_value
 
 def apply_filters(df, search_text, min_sim, max_sim, filter_column, filter_value):
-    """Apply filters to the dataframe"""
+    """Apply filters to the dataframe with enhanced sorting"""
     filtered_df = df.copy()
     
     # Similarity filter
@@ -920,7 +983,24 @@ def apply_filters(df, search_text, min_sim, max_sim, filter_column, filter_value
             (filtered_df["Similarity %"] >= min_sim) & 
             (filtered_df["Similarity %"] <= max_sim)
         ]
-        filtered_df = filtered_df.sort_values(by="Similarity %", ascending=False)
+        
+        # Enhanced sorting: first by Similarity % descending, then by Vendor Product Description descending
+        sort_columns = []
+        sort_ascending = []
+        
+        # Primary sort: Similarity % descending
+        sort_columns.append("Similarity %")
+        sort_ascending.append(False)
+        
+        # Secondary sort: Vendor Product Description alphabetical descending
+        if "Vendor Product Description" in filtered_df.columns:
+            sort_columns.append("Vendor Product Description")
+            sort_ascending.append(False)
+        elif filtered_df.columns[0] in filtered_df.columns:  # Use first column as fallback
+            sort_columns.append(filtered_df.columns[0])
+            sort_ascending.append(False)
+        
+        filtered_df = filtered_df.sort_values(by=sort_columns, ascending=sort_ascending)
     
     # Search filter
     if search_text:
@@ -940,7 +1020,7 @@ def apply_filters(df, search_text, min_sim, max_sim, filter_column, filter_value
     return filtered_df
 
 def main():
-    """Main application function with enhanced inline actions"""
+    """Main application function with enhanced inline actions and bulk operations"""
     apply_custom_css()
     
     # Initialize database connection status on first run
@@ -961,14 +1041,20 @@ def main():
         """
         <div class="main-header">
             <h1>🔍 Data Mapping Validation System</h1>
-            <p>Enhanced with inline row actions and comprehensive editing capabilities</p>
+            <p>Enhanced with bulk actions and intelligent sorting capabilities</p>
         </div>
         """,
         unsafe_allow_html=True
     )
-    # Mostrar notificación si se actualizó un mapping
+    
+    # Show bulk action notification
+    if "bulk_action_message" in st.session_state:
+        st.success(st.session_state["bulk_action_message"])
+        del st.session_state["bulk_action_message"]
+        
+    # Show mapping update notification
     if "last_mapping_update" in st.session_state:
-        st.toast(st.session_state["last_mapping_update"])  # Puedes cambiar a st.success(...) si prefieres
+        st.toast(st.session_state["last_mapping_update"])
         del st.session_state["last_mapping_update"]
         
     # Sidebar controls
@@ -999,6 +1085,7 @@ def main():
                     <h4>📊 Review Progress</h4>
                     <p><strong>{reviewed_rows}</strong> of <strong>{total_rows}</strong> rows reviewed 
                     (<strong>{progress_pct:.1f}%</strong>)</p>
+                    <small>Data sorted by: Similarity % ↓, Vendor Product Description ↓</small>
                 </div>
                 """, 
                 unsafe_allow_html=True
@@ -1036,7 +1123,7 @@ def main():
                 page_df = filtered_df.copy()
                 st.session_state.current_page = 1
             
-            # Create the enhanced inline table
+            # Create the enhanced inline table with bulk actions
             create_streamlit_table_with_actions(page_df)
             
         else:
@@ -1048,24 +1135,28 @@ def main():
         
         with st.expander("📖 **Enhanced Features Guide**"):
             st.markdown("""
-            ### New Inline Action Features:
+            ### New Bulk Action Features:
+            - **✅ Accept All Visible**: Mark all visible rows as Accept
+            - **❌ Deny All Visible**: Mark all visible rows as Deny  
+            - **🔄 Clear All Selections**: Reset all Accept/Deny selections
+            
+            ### Smart Sorting:
+            - **Primary Sort**: Similarity % (highest first)
+            - **Secondary Sort**: Vendor Product Description (alphabetical descending)
+            - Ensures most relevant matches appear first
+            
+            ### Inline Action Features:
             - **💾 Insert Button**: Directly insert rows to database with confirmation
             - **✏️ Edit Button**: Edit category, variety, color, grade with database update
             - **Modal Editing**: Safe, guided editing with confirmation dialogs
             - **Status Indicators**: Visual feedback for inserted and verified rows
             
             ### Workflow:
-            1. Upload files and process data
-            2. Use inline action buttons in each table row
-            3. Edit fields directly with the ✏️ button
-            4. Confirm changes with database updates
-            5. Track progress with visual indicators
-            
-            ### Database Operations:
-            - Real-time connection status monitoring
-            - Individual row operations with confirmation
-            - Bulk operations for efficiency
-            - Comprehensive error handling and feedback
+            1. Upload files and process data (auto-sorted by relevance)
+            2. Use bulk actions for efficient processing
+            3. Use inline action buttons for specific row modifications
+            4. Track progress with visual indicators
+            5. Confirm changes with database updates
             """)
 
 if __name__ == "__main__":
