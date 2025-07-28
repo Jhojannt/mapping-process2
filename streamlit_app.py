@@ -7,6 +7,7 @@ import time
 from logic import process_files
 from ulits import classify_missing_words
 from storage import save_output_to_disk, load_output_from_disk
+from database_integration import save_processed_data_to_database, load_processed_data_from_database
 
 # Configure page
 st.set_page_config(

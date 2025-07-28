@@ -3,3 +3,5 @@ pandas>=1.5.0
 fuzzywuzzy>=0.18.0
 python-Levenshtein>=0.20.0
 tqdm>=4.64.0
+mysql-connector-python>=8.0.33
+SQLAlchemy>=2.0.0
