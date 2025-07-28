@@ -4,6 +4,7 @@ from fuzzywuzzy import fuzz
 from fuzzywuzzy import process
 from tqdm import tqdm
 from ulits import clean_text, apply_synonyms, remove_blacklist, extract_words
+from database_integration import save_processed_data_to_database
 
 def process_files(df1: pd.DataFrame, df2: pd.DataFrame, dictionary: dict, progress_callback=None) -> pd.DataFrame:
     """
@@ -167,6 +168,16 @@ def process_files(df1: pd.DataFrame, df2: pd.DataFrame, dictionary: dict, progre
     
     update_progress(100, "¡Procesamiento completado!")
     
+        # Eliminar filas con "NN" (duplicados o vacíos)
+    df_to_save = df1[df1["Cleaned input"] != "NN"].copy()
+    
+    # Guardar en base de datos
+    success, message = save_processed_data_to_database(df_to_save)
+    if not success:
+        print(f"❌ Error al guardar en base de datos: {message}")
+    else:
+        print(f"✅ Guardado en base de datos completado: {message}")
+        
     return df1
 
 

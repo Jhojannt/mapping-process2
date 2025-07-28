@@ -4,19 +4,16 @@ import streamlit as st
 import pandas as pd
 import json
 from io import BytesIO
+import uuid
 import time
 import logging
 from logic import process_files
 from ulits import classify_missing_words
-from storage import save_output_to_disk, load_output_from_disk
+from storage import save_output_to_disk
 from database_integration import (
-    save_processed_data_to_database, 
     load_processed_data_from_database,
     MappingDatabase,
-    test_database_connection,
-    insert_single_row_to_database,
-    verify_row_in_database,
-    get_database_table_structure
+    test_database_connection
 )
 
 # Configure logging
@@ -409,7 +406,22 @@ def create_edit_modal():
         product_desc = str(row_data.get('Vendor Product Description', 'N/A'))
         vendor_name = str(row_data.get('Vendor Name', 'N/A'))
         similarity = row_data.get('Similarity %', 'N/A')
-        
+        missing = row_data.get('Missing Words', '')
+        st.info(f"**Missing Words:** {missing}")
+        # Mostrar sinónimos aplicados durante el procesamiento
+        applied_synonyms = row_data.get("Applied Synonyms", "")
+        if applied_synonyms:
+            st.success(f"🔁 **Synonyms applied:** {applied_synonyms}")
+        else:
+            st.info("No synonyms were applied.")
+
+        # Mostrar blacklist eliminadas durante el procesamiento
+        removed_blacklist = row_data.get("Removed Blacklist Words", "")
+        if removed_blacklist:
+            st.warning(f"🛑 **Blacklist words removed:** {removed_blacklist}")
+        else:
+            st.info("No blacklist words were removed.")
+            
         st.info(f"""
         **Editing Row {row_index}**
         
@@ -468,6 +480,44 @@ def create_edit_modal():
         st.session_state.edit_grado = grado
         
         # Action buttons
+        # Selector de acción: blacklist o synonym
+        st.markdown("**🛠️ Word Action (Blacklist / Synonym)**")
+
+        action = st.selectbox(
+            "Action type:",
+            ["", "blacklist", "synonym"],
+            index=["", "blacklist", "synonym"].index(row_data.get("Action", "") or ""),
+            key="modal_action_select"
+        )
+
+        # Campos dinámicos según la acción seleccionada
+        word_input_1 = ""
+        word_input_2 = ""
+
+        if action == "blacklist":
+            word_input_1 = st.text_input(
+                "Blacklist word:",
+                value=row_data.get("Word", ""),
+                key="modal_word_blacklist"
+            )
+
+        elif action == "synonym":
+            synonym_from = ""
+            synonym_to = ""
+            if ":" in str(row_data.get("Word", "")):
+                parts = row_data.get("Word", "").split(":", 1)
+                synonym_from = parts[0].strip('"')
+                synonym_to = parts[1].strip('"')
+            word_input_1 = st.text_input(
+                "Original word:",
+                value=synonym_from,
+                key="modal_synonym_from"
+            )
+            word_input_2 = st.text_input(
+                "Synonym for word:",
+                value=synonym_to,
+                key="modal_synonym_to"
+            )
         st.markdown("---")
         col1, col2, col3 = st.columns([1, 1, 1])
         
@@ -480,6 +530,20 @@ def create_edit_modal():
                     'color': color,
                     'grado': grado
                 }
+                # Obtener datos del select y campos de palabra
+                action = st.session_state.get("modal_action_select", "")
+                if action == "blacklist":
+                    word_final = st.session_state.get("modal_word_blacklist", "").strip()
+                elif action == "synonym":
+                    w1 = st.session_state.get("modal_synonym_from", "").strip()
+                    w2 = st.session_state.get("modal_synonym_to", "").strip()
+                    word_final = f'"{w1}":"{w2}"' if w1 and w2 else ""
+                else:
+                    word_final = ""
+
+                # Agregar a datos actualizados
+                updated_data["action"] = action
+                updated_data["word"] = word_final
                 
                 # Update the main dataframe
                 if st.session_state.processed_data is not None:
@@ -611,42 +675,64 @@ def create_streamlit_table_with_actions(df):
         
         with row_cols[7]:
             st.text(str(row.get('Grado', '')))
-        
+                
         # Accept checkbox
         with row_cols[8]:
             accept_key = f"accept_{idx}"
-            current_accept = st.session_state.form_data.get(accept_key, False)
-            accept = st.checkbox("", value=current_accept, key=f"accept_cb_inline_{idx}")
+            # Usa valor de BD por defecto, si no está en session_state
+            db_accept = str(row.get("Accept Map", "")).strip().lower() == "true"
+            accept = st.session_state.form_data.get(accept_key, db_accept)
+            st.session_state.form_data[accept_key] = st.checkbox("", value=accept, key=f"accept_cb_inline_{idx}")
+
+            # Exclusividad: si se marca accept, desmarcar deny
+            if st.session_state.form_data[accept_key]:
+                st.session_state.form_data[f"deny_{idx}"] = False
             
-            if accept != current_accept:
-                st.session_state.form_data[accept_key] = accept
-                if accept:
-                    st.session_state.form_data[f"deny_{idx}"] = False
         
         # Deny checkbox
         with row_cols[9]:
             deny_key = f"deny_{idx}"
-            current_deny = st.session_state.form_data.get(deny_key, False)
-            deny = st.checkbox("", value=current_deny, key=f"deny_cb_inline_{idx}")
-            
-            if deny != current_deny:
-                st.session_state.form_data[deny_key] = deny
-                if deny:
-                    st.session_state.form_data[f"accept_{idx}"] = False
+            db_deny = str(row.get("Deny Map", "")).strip().lower() == "true"
+            deny = st.session_state.form_data.get(deny_key, db_deny)
+            st.session_state.form_data[deny_key] = st.checkbox("", value=deny, key=f"deny_cb_inline_{idx}")
+
+            # Exclusividad: si se marca deny, desmarcar accept
+            if st.session_state.form_data[deny_key]:
+                st.session_state.form_data[f"accept_{idx}"] = False
+
         
         # Action buttons
         with row_cols[10]:
             action_col1, action_col2 = st.columns(2)
             
-            with action_col1:
-                insert_disabled = idx in st.session_state.inserted_rows
-                if st.button("💾", key=f"insert_inline_{idx}", 
-                           help="Insert to Database", disabled=insert_disabled):
-                    row_data = row.to_dict()
-                    row_data['_index'] = idx
-                    st.session_state.show_confirmation_modal = True
-                    st.session_state.row_to_insert = row_data
-                    st.rerun()
+        with action_col1:
+            if st.button("📝", key=f"update_mapping_{idx}", help="Update accept/deny in DB"):
+                # Obtener los valores actuales de los checkboxes desde session_state
+                accept = st.session_state.form_data.get(f"accept_{idx}", False)
+                deny = st.session_state.form_data.get(f"deny_{idx}", False)
+
+                try:
+                    from database_integration import MappingDatabase
+                    db = MappingDatabase()
+                    if db.connect():
+                        # Verificar si la fila existe en la BD
+                        exists, db_row_id = db.verify_row_exists(row.to_dict())
+                        if exists and db_row_id:
+                            update_data = {
+                                "accept_map": str(accept),
+                                "deny_map": str(deny)
+                            }
+                            success, msg = db.update_single_row(db_row_id, update_data)
+                            if success:
+                                st.session_state["last_mapping_update"] = f"✅ Mapping updated for row {idx}"
+                            else:
+                                st.session_state["last_mapping_update"] = f"❌ Failed to update DB for row {idx}"
+                        else:
+                            st.session_state["last_mapping_update"] = f"⚠️ Row not found in DB for row {idx}"
+                        db.disconnect()
+                except Exception as e:
+                    st.session_state["last_mapping_update"] = f"❌ Error updating row: {str(e)}"
+                st.rerun()
             
             with action_col2:
                 if st.button("✏️", key=f"edit_inline_{idx}", 
@@ -684,6 +770,9 @@ def create_streamlit_table_with_actions(df):
         
         # Add a subtle separator between rows
         st.markdown("<hr style='margin: 10px 0; border: 1px solid #eee;'>", unsafe_allow_html=True)
+
+
+
 
 def sidebar_controls():
     """Enhanced sidebar with all controls"""
@@ -835,7 +924,11 @@ def main():
         """,
         unsafe_allow_html=True
     )
-    
+    # Mostrar notificación si se actualizó un mapping
+    if "last_mapping_update" in st.session_state:
+        st.toast(st.session_state["last_mapping_update"])  # Puedes cambiar a st.success(...) si prefieres
+        del st.session_state["last_mapping_update"]
+        
     # Sidebar controls
     search_text, min_sim, max_sim, filter_column, filter_value = sidebar_controls()
     
