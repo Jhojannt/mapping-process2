@@ -1,4 +1,4 @@
-# Updated streamlit_app.py with bulk actions and sorting
+# Updated streamlit_app.py with bulk database save functionality
 
 import streamlit as st
 import pandas as pd
@@ -7,6 +7,8 @@ from io import BytesIO
 import uuid
 import time
 import logging
+import asyncio
+from typing import List, Dict, Any, Tuple
 from logic import process_files
 from ulits import classify_missing_words
 from storage import save_output_to_disk
@@ -55,7 +57,17 @@ def initialize_session_state():
         'similarity_range': (1, 100),
         'filter_column': 'None',
         'filter_column_index': 0,
-        'filter_value': ''
+        'filter_value': '',
+        # New variables for bulk save functionality
+        'show_bulk_save_modal': False,
+        'bulk_save_progress': 0,
+        'bulk_save_status': 'ready',
+        'bulk_save_current_batch': 0,
+        'bulk_save_total_batches': 0,
+        'bulk_save_success_count': 0,
+        'bulk_save_failed_count': 0,
+        'bulk_save_results': [],
+        'bulk_save_in_progress': False
     }
     
     for var, default_value in session_vars.items():
@@ -97,6 +109,337 @@ def insert_single_row_to_database_app(row_data, row_index):
             
     except Exception as e:
         return False, f"Error inserting row: {str(e)}"
+
+def get_rows_to_save(df) -> List[Tuple[int, Dict[str, Any]]]:
+    """Get all rows that have either Accept or Deny checked"""
+    rows_to_save = []
+    
+    for idx, row in df.iterrows():
+        accept_checked = st.session_state.form_data.get(f"accept_{idx}", False)
+        deny_checked = st.session_state.form_data.get(f"deny_{idx}", False)
+        
+        if accept_checked or deny_checked:
+            # Update row data with current form values
+            row_dict = row.to_dict()
+            row_dict['Accept Map'] = str(accept_checked)
+            row_dict['Deny Map'] = str(deny_checked)
+            rows_to_save.append((idx, row_dict))
+    
+    return rows_to_save
+
+def bulk_save_to_database(rows_to_save: List[Tuple[int, Dict[str, Any]]]) -> Dict[str, Any]:
+    """
+    Save multiple rows to database in batches of 5
+    Returns results summary
+    """
+    batch_size = 5
+    total_rows = len(rows_to_save)
+    total_batches = (total_rows + batch_size - 1) // batch_size
+    
+    results = {
+        'success_count': 0,
+        'failed_count': 0,
+        'failed_rows': [],
+        'success_rows': [],
+        'total_processed': 0
+    }
+    
+    # Initialize progress tracking
+    st.session_state.bulk_save_total_batches = total_batches
+    st.session_state.bulk_save_current_batch = 0
+    st.session_state.bulk_save_success_count = 0
+    st.session_state.bulk_save_failed_count = 0
+    st.session_state.bulk_save_results = []
+    
+    # Connect to database
+    db = MappingDatabase()
+    if not db.connect():
+        return {
+            'success_count': 0,
+            'failed_count': total_rows,
+            'failed_rows': [(idx, "Database connection failed") for idx, _ in rows_to_save],
+            'success_rows': [],
+            'total_processed': 0
+        }
+    
+    try:
+        # Process in batches
+        for batch_idx in range(0, total_rows, batch_size):
+            batch_end = min(batch_idx + batch_size, total_rows)
+            batch = rows_to_save[batch_idx:batch_end]
+            
+            # Update progress
+            current_batch_num = (batch_idx // batch_size) + 1
+            st.session_state.bulk_save_current_batch = current_batch_num
+            st.session_state.bulk_save_progress = (current_batch_num / total_batches) * 100
+            
+            # Process each row in the batch
+            for row_idx, row_data in batch:
+                try:
+                    # Clean row data
+                    clean_row_data = {k: v for k, v in row_data.items() if k != '_index'}
+                    
+                    # Check if row already exists
+                    exists, db_row_id = db.verify_row_exists(clean_row_data)
+                    
+                    if exists and db_row_id:
+                        # Update existing row
+                        update_data = {
+                            'accept_map': clean_row_data.get('Accept Map', ''),
+                            'deny_map': clean_row_data.get('Deny Map', ''),
+                            'categoria': clean_row_data.get('Categoria', ''),
+                            'variedad': clean_row_data.get('Variedad', ''),
+                            'color': clean_row_data.get('Color', ''),
+                            'grado': clean_row_data.get('Grado', '')
+                        }
+                        success, message = db.update_single_row(db_row_id, update_data)
+                        action_type = "updated"
+                    else:
+                        # Insert new row
+                        success, message = db.insert_single_row(clean_row_data)
+                        action_type = "inserted"
+                    
+                    if success:
+                        results['success_count'] += 1
+                        st.session_state.bulk_save_success_count += 1
+                        results['success_rows'].append((row_idx, f"Row {action_type} successfully"))
+                        st.session_state.inserted_rows.add(row_idx)
+                    else:
+                        results['failed_count'] += 1
+                        st.session_state.bulk_save_failed_count += 1
+                        results['failed_rows'].append((row_idx, message))
+                    
+                    results['total_processed'] += 1
+                    
+                except Exception as e:
+                    results['failed_count'] += 1
+                    st.session_state.bulk_save_failed_count += 1
+                    results['failed_rows'].append((row_idx, f"Unexpected error: {str(e)}"))
+                    results['total_processed'] += 1
+            
+            # Small delay between batches to show progress
+            time.sleep(0.2)
+            
+        # Final progress update
+        st.session_state.bulk_save_progress = 100
+        st.session_state.bulk_save_status = 'completed'
+        
+    finally:
+        db.disconnect()
+    
+    return results
+
+def create_bulk_save_modal():
+    """Create modal for bulk database save operation"""
+    if st.session_state.show_bulk_save_modal:
+        st.markdown(
+            """
+            <div style="
+                background: linear-gradient(135deg, #e3f2fd, #f1f8e9);
+                border: 3px solid #2196f3;
+                border-radius: 15px;
+                padding: 30px;
+                margin: 25px 0;
+                box-shadow: 0 10px 30px rgba(33, 150, 243, 0.2);
+                animation: modal-fade-in 0.4s ease-out;
+            ">
+                <h3 style="text-align: center; color: #1976d2; margin-bottom: 25px;">
+                    💾 Bulk Database Save Operation
+                </h3>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+        
+        if st.session_state.bulk_save_status == 'ready':
+            # Show confirmation before starting
+            if st.session_state.processed_data is not None:
+                rows_to_save = get_rows_to_save(st.session_state.processed_data)
+                
+                if len(rows_to_save) == 0:
+                    st.warning("⚠️ No rows selected for saving. Please mark rows as Accept or Deny first.")
+                    
+                    col1, col2 = st.columns([1, 1])
+                    with col2:
+                        if st.button("❌ Close", use_container_width=True, key="bulk_save_close_no_data"):
+                            st.session_state.show_bulk_save_modal = False
+                            st.rerun()
+                    return
+                
+                st.info(f"""
+                **Ready to save {len(rows_to_save)} rows to database**
+                
+                **Processing Details:**
+                - Batch Size: 5 rows per batch
+                - Total Batches: {(len(rows_to_save) + 4) // 5}
+                - Estimated Time: ~{len(rows_to_save) * 0.1:.1f} seconds
+                
+                **What will happen:**
+                - Existing rows will be updated with new Accept/Deny status
+                - New rows will be inserted into the database
+                - Progress will be shown in real-time
+                """)
+                
+                col1, col2, col3 = st.columns([1, 1, 1])
+                
+                with col1:
+                    if st.button("🚀 Start Bulk Save", type="primary", use_container_width=True, key="bulk_save_confirm"):
+                        st.session_state.bulk_save_status = 'processing'
+                        st.session_state.bulk_save_in_progress = True
+                        st.rerun()
+                
+                with col3:
+                    if st.button("❌ Cancel", use_container_width=True, key="bulk_save_cancel"):
+                        st.session_state.show_bulk_save_modal = False
+                        st.session_state.bulk_save_status = 'ready'
+                        st.rerun()
+        
+        elif st.session_state.bulk_save_status == 'processing':
+            # Show progress during processing
+            st.markdown("### 🔄 Processing in Progress...")
+            
+            # Progress information
+            progress_text = f"Batch {st.session_state.bulk_save_current_batch} of {st.session_state.bulk_save_total_batches}"
+            
+            # Custom progress bar with animation
+            progress_html = f"""
+            <div style="margin: 20px 0;">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 10px;">
+                    <span style="font-weight: bold;">Progress: {st.session_state.bulk_save_progress:.1f}%</span>
+                    <span style="color: #666;">{progress_text}</span>
+                </div>
+                <div style="
+                    width: 100%;
+                    height: 30px;
+                    background: linear-gradient(45deg, #f0f0f0, #e0e0e0);
+                    border-radius: 15px;
+                    overflow: hidden;
+                    position: relative;
+                    border: 2px solid #2196f3;
+                ">
+                    <div style="
+                        height: 100%;
+                        width: {st.session_state.bulk_save_progress}%;
+                        background: linear-gradient(45deg, #4caf50, #8bc34a, #4caf50, #8bc34a);
+                        background-size: 40px 40px;
+                        animation: progress-slide 1s linear infinite;
+                        transition: width 0.3s ease;
+                        border-radius: 13px;
+                        position: relative;
+                    "></div>
+                    <div style="
+                        position: absolute;
+                        top: 50%;
+                        left: 50%;
+                        transform: translate(-50%, -50%);
+                        color: white;
+                        font-weight: bold;
+                        text-shadow: 1px 1px 2px rgba(0,0,0,0.7);
+                        z-index: 10;
+                    ">{st.session_state.bulk_save_progress:.1f}%</div>
+                </div>
+            </div>
+            
+            <style>
+            @keyframes progress-slide {{
+                0% {{ background-position: 0 0; }}
+                100% {{ background-position: 40px 0; }}
+            }}
+            </style>
+            """
+            
+            st.markdown(progress_html, unsafe_allow_html=True)
+            
+            # Status indicators
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("✅ Successful", st.session_state.bulk_save_success_count)
+            with col2:
+                st.metric("❌ Failed", st.session_state.bulk_save_failed_count)
+            with col3:
+                st.metric("📊 Batches", f"{st.session_state.bulk_save_current_batch}/{st.session_state.bulk_save_total_batches}")
+            
+            # Process the actual bulk save
+            if st.session_state.bulk_save_in_progress:
+                rows_to_save = get_rows_to_save(st.session_state.processed_data)
+                
+                # Run bulk save
+                with st.spinner("Processing batch..."):
+                    results = bulk_save_to_database(rows_to_save)
+                
+                # Store results and move to completed state
+                st.session_state.bulk_save_results = results
+                st.session_state.bulk_save_status = 'completed'
+                st.session_state.bulk_save_in_progress = False
+                st.rerun()
+        
+        elif st.session_state.bulk_save_status == 'completed':
+            # Show completion results
+            results = st.session_state.bulk_save_results
+            
+            st.markdown("### ✅ Bulk Save Completed!")
+            
+            # Results summary
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("✅ Successful Operations", results['success_count'])
+            with col2:
+                st.metric("❌ Failed Operations", results['failed_count'])
+            with col3:
+                st.metric("📊 Total Processed", results['total_processed'])
+            
+            # Success rate
+            if results['total_processed'] > 0:
+                success_rate = (results['success_count'] / results['total_processed']) * 100
+                
+                if success_rate == 100:
+                    st.success(f"🎉 Perfect! {success_rate:.1f}% success rate")
+                elif success_rate >= 90:
+                    st.success(f"✅ Excellent! {success_rate:.1f}% success rate")
+                elif success_rate >= 70:
+                    st.warning(f"⚠️ Good: {success_rate:.1f}% success rate")
+                else:
+                    st.error(f"❌ Issues detected: {success_rate:.1f}% success rate")
+            
+            # Show failed rows if any
+            if results['failed_count'] > 0:
+                with st.expander(f"❌ View {results['failed_count']} Failed Operations"):
+                    for row_idx, error_msg in results['failed_rows']:
+                        st.error(f"Row {row_idx}: {error_msg}")
+            
+            # Show successful rows summary
+            if results['success_count'] > 0:
+                with st.expander(f"✅ View {results['success_count']} Successful Operations"):
+                    for row_idx, success_msg in results['success_rows']:
+                        st.success(f"Row {row_idx}: {success_msg}")
+            
+            # Action buttons
+            col1, col2 = st.columns([1, 1])
+            
+            with col1:
+                if st.button("🔄 Process More", type="primary", use_container_width=True, key="bulk_save_process_more"):
+                    # Reset for another round
+                    st.session_state.bulk_save_status = 'ready'
+                    st.session_state.bulk_save_progress = 0
+                    st.session_state.bulk_save_current_batch = 0
+                    st.session_state.bulk_save_total_batches = 0
+                    st.session_state.bulk_save_success_count = 0
+                    st.session_state.bulk_save_failed_count = 0
+                    st.session_state.bulk_save_results = []
+                    st.rerun()
+            
+            with col2:
+                if st.button("✅ Close", use_container_width=True, key="bulk_save_close_completed"):
+                    # Reset and close modal
+                    st.session_state.show_bulk_save_modal = False
+                    st.session_state.bulk_save_status = 'ready'
+                    st.session_state.bulk_save_progress = 0
+                    st.session_state.bulk_save_current_batch = 0
+                    st.session_state.bulk_save_total_batches = 0
+                    st.session_state.bulk_save_success_count = 0
+                    st.session_state.bulk_save_failed_count = 0
+                    st.session_state.bulk_save_results = []
+                    st.rerun()
 
 def mark_all_accept(filtered_df):
     """Mark all visible rows as Accept and clear Deny"""
@@ -273,6 +616,24 @@ def apply_custom_css():
         font-size: 1.1em;
     }}
     
+    /* Bulk save button special styling */
+    .bulk-save-container {{
+        background: linear-gradient(135deg, #e8f5e8, #f0fff0);
+        border: 3px solid #28a745;
+        border-radius: 15px;
+        padding: 25px;
+        margin: 25px 0;
+        box-shadow: 0 6px 20px rgba(40, 167, 69, 0.2);
+        text-align: center;
+    }}
+    
+    .bulk-save-header {{
+        color: #28a745;
+        font-weight: bold;
+        font-size: 1.3em;
+        margin-bottom: 15px;
+    }}
+    
     /* Highlight cells */
     .highlight-cell {{
         background: linear-gradient(135deg, #fffec6, #fff9c4) !important;
@@ -317,6 +678,12 @@ def apply_custom_css():
         flex-wrap: wrap;
     }}
     
+    /* Progress animation for bulk save */
+    @keyframes progress-slide {{
+        0% {{ background-position: 0 0; }}
+        100% {{ background-position: 40px 0; }}
+    }}
+    
     /* Responsive design */
     @media (max-width: 768px) {{
         .main-header {{
@@ -335,6 +702,11 @@ def apply_custom_css():
         .bulk-action-container {{
             padding: 15px;
             margin: 15px 0;
+        }}
+        
+        .bulk-save-container {{
+            padding: 20px;
+            margin: 20px 0;
         }}
     }}
     </style>
@@ -853,6 +1225,55 @@ def create_streamlit_table_with_actions(df):
             st.session_state["bulk_action_message"] = f"🔄 Cleared all selections for {len(df)} rows"
             st.rerun()
 
+    # NEW: Bulk Save to Database Section
+    st.markdown("---")
+    
+    # Get count of rows ready to save
+    if st.session_state.processed_data is not None:
+        rows_to_save = get_rows_to_save(st.session_state.processed_data)
+        rows_to_save_count = len(rows_to_save)
+    else:
+        rows_to_save_count = 0
+    
+    st.markdown(
+        f"""
+        <div class="bulk-save-container">
+            <div class="bulk-save-header">💾 Bulk Database Operations</div>
+            <p style="color: #666; margin-bottom: 15px;">
+                Ready to save <strong>{rows_to_save_count}</strong> rows with Accept/Deny selections
+            </p>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    
+    # Bulk Save Button
+    col1, col2, col3 = st.columns([1, 1, 1])
+    
+    with col2:  # Center the button
+        if st.button(
+            f"💾 Save {rows_to_save_count} Rows to Database", 
+            type="primary", 
+            use_container_width=True, 
+            key="bulk_save_to_db_btn",
+            help="Save all rows with Accept or Deny selections to database in batches of 5",
+            disabled=(st.session_state.db_connection_status != "connected" or rows_to_save_count == 0)
+        ):
+            if st.session_state.db_connection_status != "connected":
+                st.error("❌ Database not connected. Please test connection first.")
+            elif rows_to_save_count == 0:
+                st.warning("⚠️ No rows selected for saving. Please mark rows as Accept or Deny first.")
+            else:
+                st.session_state.show_bulk_save_modal = True
+                st.session_state.bulk_save_status = 'ready'
+                st.rerun()
+    
+    # Show database connection reminder if not connected
+    if st.session_state.db_connection_status != "connected":
+        st.info("💡 **Tip:** Test database connection in sidebar to enable bulk save functionality")
+    elif rows_to_save_count == 0:
+        st.info("💡 **Tip:** Mark rows as Accept or Deny to enable bulk save functionality")
+
 def sidebar_controls():
     """Enhanced sidebar with all controls"""
     st.sidebar.header("📁 File Upload & Database")
@@ -1020,7 +1441,7 @@ def apply_filters(df, search_text, min_sim, max_sim, filter_column, filter_value
     return filtered_df
 
 def main():
-    """Main application function with enhanced inline actions and bulk operations"""
+    """Main application function with enhanced bulk save functionality"""
     apply_custom_css()
     
     # Initialize database connection status on first run
@@ -1036,12 +1457,16 @@ def main():
         create_edit_modal()
         return
     
+    if st.session_state.show_bulk_save_modal:
+        create_bulk_save_modal()
+        return
+    
     # Header
     st.markdown(
         """
         <div class="main-header">
             <h1>🔍 Data Mapping Validation System</h1>
-            <p>Enhanced with bulk actions and intelligent sorting capabilities</p>
+            <p>Enhanced with bulk database operations and intelligent progress tracking</p>
         </div>
         """,
         unsafe_allow_html=True
@@ -1123,7 +1548,7 @@ def main():
                 page_df = filtered_df.copy()
                 st.session_state.current_page = 1
             
-            # Create the enhanced inline table with bulk actions
+            # Create the enhanced inline table with bulk actions and database save
             create_streamlit_table_with_actions(page_df)
             
         else:
@@ -1135,7 +1560,13 @@ def main():
         
         with st.expander("📖 **Enhanced Features Guide**"):
             st.markdown("""
-            ### New Bulk Action Features:
+            ### New Bulk Database Save Features:
+            - **💾 Bulk Save to Database**: Save all Accept/Deny selections in batches of 5 rows
+            - **Progress Modal**: Real-time progress tracking with animated progress bars
+            - **Batch Processing**: Automatic batching prevents database overload
+            - **Error Handling**: Detailed success/failure reporting for each batch
+            
+            ### Existing Bulk Action Features:
             - **✅ Accept All Visible**: Mark all visible rows as Accept
             - **❌ Deny All Visible**: Mark all visible rows as Deny  
             - **🔄 Clear All Selections**: Reset all Accept/Deny selections
@@ -1153,10 +1584,10 @@ def main():
             
             ### Workflow:
             1. Upload files and process data (auto-sorted by relevance)
-            2. Use bulk actions for efficient processing
-            3. Use inline action buttons for specific row modifications
-            4. Track progress with visual indicators
-            5. Confirm changes with database updates
+            2. Use bulk actions for efficient Accept/Deny marking
+            3. Use bulk database save for efficient persistence (5 rows at a time)
+            4. Monitor progress with real-time feedback
+            5. Handle individual row edits as needed
             """)
 
 if __name__ == "__main__":
