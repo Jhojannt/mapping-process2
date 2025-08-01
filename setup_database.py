@@ -28,9 +28,9 @@ logger = logging.getLogger(__name__)
 
 # Database configuration
 DB_CONFIG = {
-    'host': os.getenv('DB_HOST', 'localhost'),
-    'user': os.getenv('DB_USER', 'root'),
-    'password': os.getenv('DB_PASSWORD', 'Maracuya123'),
+    'host': os.getenv('DB_HOST', 'http://mapping-process.cjjrhjl6dwxu.us-east-1.rds.amazonaws.com'),
+    'user': os.getenv('DB_USER', 'mapping'),
+    'password': os.getenv('DB_PASSWORD', 'wo0066upzahPfwB4U'),
     'charset': 'utf8mb4',
     'autocommit': True
 }
