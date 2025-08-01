@@ -5,7 +5,7 @@ from fuzzywuzzy import process
 from typing import Dict, Any, Tuple, List
 import logging
 from ulits import clean_text, apply_synonyms, remove_blacklist, extract_words
-from enhanced_multi_client_database import EnhancedMultiClientDatabase
+from Enhanced_MultiClient_Database import EnhancedMultiClientDatabase
 
 class RowLevelProcessor:
     """

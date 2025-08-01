@@ -21,7 +21,7 @@ from typing import Tuple, List, Dict, Any
 import logging
 from datetime import datetime
 import json
-from enhanced_multi_client_database import create_enhanced_client_databases
+from Enhanced_MultiClient_Database import create_enhanced_client_databases
 
 # Setup logging
 logging.basicConfig(
@@ -400,7 +400,7 @@ def test_enhanced_operations(client_id: str) -> Tuple[bool, str]:
     print(f"🧪 Testing enhanced operations for client '{client_id}'...")
     
     try:
-        from enhanced_multi_client_database import EnhancedMultiClientDatabase
+        from Enhanced_MultiClient_Database import EnhancedMultiClientDatabase
         from row_level_processing import RowLevelProcessor
         
         # Test database connections
