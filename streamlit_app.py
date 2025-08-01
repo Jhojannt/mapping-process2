@@ -1,5 +1,3 @@
-# Updated streamlit_app.py with bulk database save functionality
-
 import streamlit as st
 import pandas as pd
 import json
@@ -1526,7 +1524,7 @@ def main():
             st.markdown(progress_html, unsafe_allow_html=True)
             
             # Pagination
-            rows_per_page = 10
+            rows_per_page = 50
             total_pages = (len(filtered_df) + rows_per_page - 1) // rows_per_page
             
             if total_pages > 1:
