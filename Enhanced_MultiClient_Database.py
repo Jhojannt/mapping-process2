@@ -535,15 +535,17 @@ class EnhancedMultiClientDatabase:
             return False, error_msg
     
     def load_processed_data(self) -> Optional[pd.DataFrame]:
-        """Load all processed data for current client"""
+        """Load all processed data for current client - FIXED VERSION"""
         if not self.client_id:
             return None
-        
+
         try:
+            # Create SQLAlchemy connection string
             config = self.connection_config.copy()
-            config['database'] = self.get_client_database_name("main")
+            database_name = self.get_client_database_name("main")
             
-            connection = mysql.connector.connect(**config)
+            # Build connection string for SQLAlchemy
+            connection_string = f"mysql+mysqlconnector://{config['user']}:{config['password']}@{config['host']}/{database_name}?charset={config['charset']}"
             
             query = """
             SELECT 
@@ -579,12 +581,12 @@ class EnhancedMultiClientDatabase:
                 created_at,
                 updated_at
             FROM processed_mappings 
-            WHERE client_id = %s
+            WHERE client_id = %(client_id)s
             ORDER BY created_at DESC
             """
             
-            df = pd.read_sql(query, connection, params=[self.client_id])
-            connection.close()
+            # Use SQLAlchemy with pandas
+            df = pd.read_sql(query, connection_string, params={'client_id': self.client_id})
             
             self.logger.info(f"Loaded {len(df)} records for client {self.client_id}")
             return df
@@ -630,31 +632,38 @@ class EnhancedMultiClientDatabase:
             error_msg = f"Error saving product to staging: {str(e)}"
             self.logger.error(error_msg)
             return False, error_msg
-    
+        
+        
     def get_staging_products(self) -> Optional[pd.DataFrame]:
-        """Get staging products for current client"""
+        """Get staging products for current client - FIXED VERSION"""
         if not self.client_id:
             return None
-        
+
         try:
+            # Create SQLAlchemy connection string
             config = self.connection_config.copy()
-            config['database'] = self.get_client_database_name("staging_products")
-            connection = mysql.connector.connect(**config)
+            database_name = self.get_client_database_name("staging_products")
+            
+            # Build connection string for SQLAlchemy
+            connection_string = f"mysql+mysqlconnector://{config['user']}:{config['password']}@{config['host']}/{database_name}?charset={config['charset']}"
             
             query = """
             SELECT * FROM staging_products_to_create 
-            WHERE client_id = %s 
+            WHERE client_id = %(client_id)s 
             ORDER BY created_at DESC
             """
             
-            df = pd.read_sql(query, connection, params=[self.client_id])
-            connection.close()
+            # Use SQLAlchemy with pandas
+            df = pd.read_sql(query, connection_string, params={'client_id': self.client_id})
             
             return df
             
         except Exception as e:
             self.logger.error(f"Error getting staging products: {str(e)}")
             return None
+        
+        
+        
     
     def update_synonyms_blacklist(self, synonym_data: List[Dict], blacklist_data: List[str]) -> Tuple[bool, str]:
         """Update synonyms and blacklist for current client"""
