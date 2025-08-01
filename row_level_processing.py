@@ -1,36 +1,66 @@
-# row_level_processing.py - Individual row processing and fuzzy matching
+# enhanced_row_level_processing.py - Updated for Enhanced Multi-Client System
+"""
+Enhanced Row-Level Processing Module
+
+Handles individual row processing, fuzzy matching, and product creation
+with full integration to the enhanced multi-client database system.
+
+Key Features:
+- Individual row reprocessing with updated synonyms/blacklist
+- Combined catalog fuzzy matching (master + staging)
+- Direct database updates with client isolation
+- Enhanced error handling and logging
+- Optimized database operations
+"""
+
 import pandas as pd
 from fuzzywuzzy import fuzz
 from fuzzywuzzy import process
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Tuple, List, Optional
 import logging
-from ulits import clean_text, apply_synonyms, remove_blacklist, extract_words
-from Enhanced_MultiClient_Database import EnhancedMultiClientDatabase
+import mysql.connector
+from datetime import datetime
 
-class RowLevelProcessor:
+# Import enhanced database system
+from Enhanced_MultiClient_Database import (
+    EnhancedMultiClientDatabase,
+    get_client_synonyms_blacklist,
+    update_client_synonyms_blacklist,
+    save_new_product_to_staging
+)
+from ulits import clean_text, apply_synonyms, remove_blacklist, extract_words
+
+class EnhancedRowLevelProcessor:
     """
-    Handles individual row processing, fuzzy matching, and product creation
+    Enhanced row processor with full multi-client database integration
     """
     
     def __init__(self, client_id: str):
         self.client_id = client_id
         self.db = EnhancedMultiClientDatabase(client_id)
-        self.logger = logging.getLogger(f"RowProcessor_{client_id}")
+        self.logger = logging.getLogger(f"EnhancedRowProcessor_{client_id}")
+        
+        # Cache for performance optimization
+        self._catalog_cache = None
+        self._cache_timestamp = None
+        self._cache_ttl = 300  # 5 minutes cache TTL
     
     def reprocess_single_row(self, row_data: Dict[str, Any], 
-                           update_synonyms_blacklist: bool = True) -> Tuple[bool, Dict[str, Any]]:
+                           update_synonyms_blacklist: bool = True,
+                           force_catalog_refresh: bool = False) -> Tuple[bool, Dict[str, Any]]:
         """
-        Re-process a single row with updated synonyms/blacklist and combined catalog
+        Enhanced row reprocessing with optimized database operations
         
         Args:
             row_data: Dictionary containing row data
             update_synonyms_blacklist: Whether to update synonyms/blacklist before processing
+            force_catalog_refresh: Force refresh of catalog cache
             
         Returns:
             (success: bool, updated_row_data: Dict[str, Any])
         """
         try:
-            self.logger.info(f"Starting reprocessing for row ID: {row_data.get('id', 'unknown')}")
+            self.logger.info(f"Starting enhanced reprocessing for row ID: {row_data.get('id', 'unknown')}")
             
             # 1. Update synonyms and blacklist if requested
             if update_synonyms_blacklist:
@@ -38,8 +68,8 @@ class RowLevelProcessor:
                 if not success:
                     self.logger.warning("Failed to update synonyms/blacklist, continuing with existing data")
             
-            # 2. Get current synonyms and blacklist
-            synonyms_blacklist = self.db.get_synonyms_blacklist()
+            # 2. Get current synonyms and blacklist using enhanced system
+            synonyms_blacklist = get_client_synonyms_blacklist(self.client_id)
             
             # 3. Get original input
             original_input = str(row_data.get('Vendor Product Description', ''))
@@ -59,8 +89,8 @@ class RowLevelProcessor:
                 cleaned_with_synonyms, synonyms_blacklist.get('blacklist', {}).get('input', [])
             )
             
-            # 7. Get combined catalog for fuzzy matching
-            combined_catalog = self._get_combined_catalog_data()
+            # 7. Get combined catalog for fuzzy matching (with caching)
+            combined_catalog = self._get_combined_catalog_data(force_catalog_refresh)
             
             if not combined_catalog:
                 self.logger.warning("No catalog data available for fuzzy matching")
@@ -95,7 +125,7 @@ class RowLevelProcessor:
             return False, row_data
     
     def _update_synonyms_blacklist_from_row(self, row_data: Dict[str, Any]) -> bool:
-        """Update synonyms and blacklist based on row action and word fields"""
+        """Enhanced synonyms/blacklist update using new system"""
         try:
             action = str(row_data.get('Action', '')).strip().lower()
             word = str(row_data.get('Word', '')).strip()
@@ -103,8 +133,8 @@ class RowLevelProcessor:
             if not action or not word:
                 return True  # No action needed
             
-            # Get current synonyms and blacklist
-            current_data = self.db.get_synonyms_blacklist()
+            # Get current data using enhanced system
+            current_data = get_client_synonyms_blacklist(self.client_id)
             synonyms_list = []
             blacklist_list = list(current_data.get('blacklist', {}).get('input', []))
             
@@ -132,10 +162,15 @@ class RowLevelProcessor:
                     blacklist_list.append(word)
                     self.logger.info(f"Added to blacklist: {word}")
             
-            # Update database
-            success, message = self.db.update_synonyms_blacklist(synonyms_list, blacklist_list)
+            # Update database using enhanced system
+            success, message = update_client_synonyms_blacklist(
+                self.client_id, synonyms_list, blacklist_list
+            )
+            
             if success:
                 self.logger.info(f"Updated synonyms/blacklist: {message}")
+                # Clear cache to force refresh
+                self._catalog_cache = None
             else:
                 self.logger.error(f"Failed to update synonyms/blacklist: {message}")
             
@@ -145,9 +180,20 @@ class RowLevelProcessor:
             self.logger.error(f"Error updating synonyms/blacklist from row: {str(e)}")
             return False
     
-    def _get_combined_catalog_data(self) -> List[Dict[str, Any]]:
-        """Get combined catalog data from both master and staging databases"""
+    def _get_combined_catalog_data(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        """Get combined catalog data with intelligent caching"""
         try:
+            # Check cache validity
+            current_time = datetime.now()
+            if (not force_refresh and 
+                self._catalog_cache is not None and 
+                self._cache_timestamp is not None and
+                (current_time - self._cache_timestamp).seconds < self._cache_ttl):
+                
+                self.logger.debug("Using cached catalog data")
+                return self._catalog_cache
+            
+            self.logger.info("Refreshing catalog data from database")
             catalog_data = []
             
             # 1. Get master catalog data
@@ -158,27 +204,31 @@ class RowLevelProcessor:
             staging_data = self._get_staging_catalog_data()
             catalog_data.extend(staging_data)
             
+            # Update cache
+            self._catalog_cache = catalog_data
+            self._cache_timestamp = current_time
+            
             self.logger.info(f"Retrieved {len(catalog_data)} total catalog entries ({len(master_data)} master + {len(staging_data)} staging)")
             return catalog_data
             
         except Exception as e:
             self.logger.error(f"Error getting combined catalog data: {str(e)}")
-            return []
+            return self._catalog_cache or []  # Return cached data if available
     
     def _get_master_catalog_data(self) -> List[Dict[str, Any]]:
-        """Get data from master product catalog"""
+        """Get data from master product catalog with optimized query"""
         try:
             config = self.db.connection_config.copy()
             config['database'] = self.db.get_client_database_name("product_catalog")
             
-            import mysql.connector
             connection = mysql.connector.connect(**config)
             cursor = connection.cursor(dictionary=True)
             
             cursor.execute("""
                 SELECT categoria, variedad, color, grado, catalog_id, search_key
                 FROM product_catalog 
-                WHERE client_id = %s
+                WHERE client_id = %s AND is_active = TRUE
+                ORDER BY created_at DESC
             """, (self.client_id,))
             
             results = cursor.fetchall()
@@ -188,7 +238,10 @@ class RowLevelProcessor:
             # Format for fuzzy matching
             formatted_data = []
             for row in results:
-                search_key = row.get('search_key') or f"{row['categoria']} {row['variedad']} {row['color']} {row['grado']}".strip()
+                search_key = row.get('search_key')
+                if not search_key:
+                    search_key = f"{row['categoria']} {row['variedad']} {row['color']} {row['grado']}".strip()
+                
                 formatted_data.append({
                     'search_key': clean_text(search_key),
                     'categoria': row['categoria'] or '',
@@ -206,19 +259,19 @@ class RowLevelProcessor:
             return []
     
     def _get_staging_catalog_data(self) -> List[Dict[str, Any]]:
-        """Get data from staging products catalog"""
+        """Get data from staging products catalog with status filtering"""
         try:
             config = self.db.connection_config.copy()
             config['database'] = self.db.get_client_database_name("staging_products")
             
-            import mysql.connector
             connection = mysql.connector.connect(**config)
             cursor = connection.cursor(dictionary=True)
             
             cursor.execute("""
-                SELECT categoria, variedad, color, grado, catalog_id, search_key
+                SELECT categoria, variedad, color, grado, catalog_id, search_key, status
                 FROM staging_products_to_create 
-                WHERE client_id = %s AND status = 'pending'
+                WHERE client_id = %s AND status IN ('pending', 'approved')
+                ORDER BY created_at DESC
             """, (self.client_id,))
             
             results = cursor.fetchall()
@@ -228,7 +281,10 @@ class RowLevelProcessor:
             # Format for fuzzy matching
             formatted_data = []
             for row in results:
-                search_key = row.get('search_key') or f"{row['categoria']} {row['variedad']} {row['color']} {row['grado']}".strip()
+                search_key = row.get('search_key')
+                if not search_key:
+                    search_key = f"{row['categoria']} {row['variedad']} {row['color']} {row['grado']}".strip()
+                
                 formatted_data.append({
                     'search_key': clean_text(search_key),
                     'categoria': row['categoria'] or '',
@@ -236,7 +292,8 @@ class RowLevelProcessor:
                     'color': row['color'] or '',
                     'grado': row['grado'] or '',
                     'catalog_id': row['catalog_id'] or '111111',  # Always 111111 for staging
-                    'source': 'staging'
+                    'source': 'staging',
+                    'status': row.get('status', 'pending')
                 })
             
             return formatted_data
@@ -246,7 +303,7 @@ class RowLevelProcessor:
             return []
     
     def _perform_fuzzy_matching(self, cleaned_input: str, catalog_data: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Perform fuzzy matching against combined catalog"""
+        """Enhanced fuzzy matching with better scoring and fallbacks"""
         try:
             if not cleaned_input.strip():
                 return self._empty_match_result()
@@ -257,10 +314,18 @@ class RowLevelProcessor:
             if not search_keys:
                 return self._empty_match_result()
             
-            # Perform fuzzy matching
+            # Perform fuzzy matching with multiple algorithms
             best_match, similarity = process.extractOne(
                 cleaned_input, search_keys, scorer=fuzz.token_sort_ratio
             )
+            
+            # Try alternative scoring if similarity is low
+            if similarity < 70:
+                alt_match, alt_similarity = process.extractOne(
+                    cleaned_input, search_keys, scorer=fuzz.partial_ratio
+                )
+                if alt_similarity > similarity:
+                    best_match, similarity = alt_match, alt_similarity
             
             # Find the corresponding catalog item
             matched_item = None
@@ -281,14 +346,15 @@ class RowLevelProcessor:
             return {
                 'best_match': best_match,
                 'similarity': similarity,
-                'matched_words': ' '.join(matched_words),
-                'missing_words': ' '.join(missing_words),
+                'matched_words': ' '.join(sorted(matched_words)),
+                'missing_words': ' '.join(sorted(missing_words)),
                 'catalog_id': matched_item['catalog_id'],
                 'categoria': matched_item['categoria'],
                 'variedad': matched_item['variedad'],
                 'color': matched_item['color'],
                 'grado': matched_item['grado'],
-                'source': matched_item['source']
+                'source': matched_item['source'],
+                'status': matched_item.get('status', 'active')
             }
             
         except Exception as e:
@@ -296,7 +362,7 @@ class RowLevelProcessor:
             return self._empty_match_result()
     
     def _empty_match_result(self) -> Dict[str, Any]:
-        """Return empty match result"""
+        """Return empty match result with consistent structure"""
         return {
             'best_match': '',
             'similarity': 0,
@@ -307,29 +373,29 @@ class RowLevelProcessor:
             'variedad': '',
             'color': '',
             'grado': '',
-            'source': 'none'
+            'source': 'none',
+            'status': 'none'
         }
     
     def save_row_as_new_product(self, row_data: Dict[str, Any], 
                                categoria: str, variedad: str, color: str, grado: str,
                                created_by: str = None) -> Tuple[bool, str]:
-        """Save modified row data as new product in staging"""
+        """Enhanced product saving using new staging system"""
         try:
-            row_id = row_data.get('id', 0)
+            row_id = row_data.get('id', 0) 
             original_input = str(row_data.get('Vendor Product Description', ''))
             
-            success, message = self.db.save_product_to_staging(
-                categoria=categoria,
-                variedad=variedad,
-                color=color,
-                grado=grado,
-                original_row_id=row_id,
-                original_input=original_input,
-                created_by=created_by or 'system'
+            # Use enhanced staging system
+            success, message = save_new_product_to_staging(
+                self.client_id,
+                categoria, variedad, color, grado,
+                row_id, original_input, created_by or 'enhanced_system'
             )
             
             if success:
                 self.logger.info(f"Saved new product to staging: {categoria}, {variedad}, {color}, {grado}")
+                # Clear catalog cache to include new staging product
+                self._catalog_cache = None
             else:
                 self.logger.error(f"Failed to save new product: {message}")
             
@@ -341,31 +407,41 @@ class RowLevelProcessor:
             return False, error_msg
     
     def update_row_in_database(self, row_id: int, updated_data: Dict[str, Any]) -> Tuple[bool, str]:
-        """Update a specific row in the main mapping database"""
+        """Enhanced database update with better error handling"""
         try:
             # Connect to main database
             config = self.db.connection_config.copy()
             config['database'] = self.db.get_client_database_name("main")
             
-            import mysql.connector
             connection = mysql.connector.connect(**config)
             cursor = connection.cursor()
             
             # Build update query for allowed fields
-            allowed_fields = [
-                'cleaned_input', 'applied_synonyms', 'removed_blacklist_words',
-                'best_match', 'similarity_percentage', 'matched_words', 'missing_words',
-                'catalog_id', 'categoria', 'variedad', 'color', 'grado',
-                'accept_map', 'action', 'word'
-            ]
+            allowed_fields = {
+                'Cleaned input': 'cleaned_input',
+                'Applied Synonyms': 'applied_synonyms', 
+                'Removed Blacklist Words': 'removed_blacklist_words',
+                'Best match': 'best_match',
+                'Similarity %': 'similarity_percentage',
+                'Matched Words': 'matched_words',
+                'Missing Words': 'missing_words',
+                'Catalog ID': 'catalog_id',
+                'Categoria': 'categoria',
+                'Variedad': 'variedad', 
+                'Color': 'color',
+                'Grado': 'grado',
+                'Accept Map': 'accept_map',
+                'Deny Map': 'deny_map',
+                'Action': 'action',
+                'Word': 'word'
+            }
             
             update_fields = []
             update_values = []
             
             for field, value in updated_data.items():
-                # Convert field names to database column names
-                db_field = self._convert_field_name(field)
-                if db_field in allowed_fields:
+                db_field = allowed_fields.get(field, field.lower().replace(' ', '_'))
+                if db_field in allowed_fields.values():
                     update_fields.append(f"{db_field} = %s")
                     update_values.append(str(value) if value is not None else '')
             
@@ -401,59 +477,78 @@ class RowLevelProcessor:
             self.logger.error(error_msg)
             return False, error_msg
     
-    def _convert_field_name(self, field_name: str) -> str:
-        """Convert display field names to database column names"""
-        field_mapping = {
-            'Cleaned input': 'cleaned_input',
-            'Applied Synonyms': 'applied_synonyms',
-            'Removed Blacklist Words': 'removed_blacklist_words',
-            'Best match': 'best_match',
-            'Similarity %': 'similarity_percentage',
-            'Matched Words': 'matched_words',
-            'Missing Words': 'missing_words',
-            'Catalog ID': 'catalog_id',
-            'Categoria': 'categoria',
-            'Variedad': 'variedad',
-            'Color': 'color',
-            'Grado': 'grado',
-            'Accept Map': 'accept_map',
-            'Action': 'action',
-            'Word': 'word'
-        }
-        
-        return field_mapping.get(field_name, field_name.lower().replace(' ', '_'))
+    def get_processing_statistics(self) -> Dict[str, Any]:
+        """Get processing statistics for the current client"""
+        try:
+            stats = {
+                'client_id': self.client_id,
+                'catalog_cache_status': 'active' if self._catalog_cache else 'empty',
+                'catalog_entries': len(self._catalog_cache) if self._catalog_cache else 0,
+                'cache_age_seconds': (datetime.now() - self._cache_timestamp).seconds if self._cache_timestamp else 0
+            }
+            
+            # Get database statistics
+            try:
+                from Enhanced_MultiClient_Database import get_client_statistics
+                db_stats = get_client_statistics(self.client_id)
+                stats.update(db_stats)
+            except Exception as e:
+                stats['db_error'] = str(e)
+            
+            return stats
+            
+        except Exception as e:
+            return {'error': f"Failed to get statistics: {str(e)}"}
+    
+    def clear_cache(self):
+        """Clear internal caches"""
+        self._catalog_cache = None
+        self._cache_timestamp = None
+        self.logger.info("Cleared catalog cache")
 
 
-# Convenience functions for easy integration
-def reprocess_row(client_id: str, row_data: Dict[str, Any], 
-                 update_synonyms: bool = True) -> Tuple[bool, Dict[str, Any]]:
-    """Convenience function to reprocess a single row"""
-    processor = RowLevelProcessor(client_id)
-    return processor.reprocess_single_row(row_data, update_synonyms)
+# Enhanced convenience functions with better error handling
+def enhanced_reprocess_row(client_id: str, row_data: Dict[str, Any], 
+                          update_synonyms: bool = True,
+                          force_catalog_refresh: bool = False) -> Tuple[bool, Dict[str, Any]]:
+    """Enhanced convenience function to reprocess a single row"""
+    processor = EnhancedRowLevelProcessor(client_id)
+    return processor.reprocess_single_row(row_data, update_synonyms, force_catalog_refresh)
 
-def save_new_product(client_id: str, row_data: Dict[str, Any], 
-                    categoria: str, variedad: str, color: str, grado: str,
-                    created_by: str = None) -> Tuple[bool, str]:
-    """Convenience function to save new product"""
-    processor = RowLevelProcessor(client_id)
+def enhanced_save_new_product(client_id: str, row_data: Dict[str, Any], 
+                             categoria: str, variedad: str, color: str, grado: str,
+                             created_by: str = None) -> Tuple[bool, str]:
+    """Enhanced convenience function to save new product"""
+    processor = EnhancedRowLevelProcessor(client_id)
     return processor.save_row_as_new_product(row_data, categoria, variedad, color, grado, created_by)
 
-def update_row_in_main_db(client_id: str, row_id: int, updated_data: Dict[str, Any]) -> Tuple[bool, str]:
-    """Convenience function to update row in main database"""
-    processor = RowLevelProcessor(client_id)
+def enhanced_update_row_in_main_db(client_id: str, row_id: int, 
+                                  updated_data: Dict[str, Any]) -> Tuple[bool, str]:
+    """Enhanced convenience function to update row in main database"""
+    processor = EnhancedRowLevelProcessor(client_id)
     return processor.update_row_in_database(row_id, updated_data)
+
+def get_row_processing_stats(client_id: str) -> Dict[str, Any]:
+    """Get processing statistics for a client"""
+    processor = EnhancedRowLevelProcessor(client_id)
+    return processor.get_processing_statistics()
+
+# Backward compatibility - keeping original function names
+reprocess_row = enhanced_reprocess_row
+save_new_product = enhanced_save_new_product  
+update_row_in_main_db = enhanced_update_row_in_main_db
 
 
 if __name__ == "__main__":
-    # Test row-level processing
+    # Enhanced testing
     logging.basicConfig(level=logging.INFO)
     
-    print("🧪 Testing Row-Level Processing...")
+    print("🧪 Testing Enhanced Row-Level Processing...")
     
-    test_client = "test_row_client"
+    test_client = "bill_doran"  # Using your actual client
     
     # Create test processor
-    processor = RowLevelProcessor(test_client)
+    processor = EnhancedRowLevelProcessor(test_client)
     
     # Test row data
     test_row = {
@@ -471,17 +566,21 @@ if __name__ == "__main__":
         'Word': '"premium":"high quality"'
     }
     
-    print(f"\n1. Testing row reprocessing...")
+    print(f"\n1. Testing enhanced row reprocessing...")
     success, updated_row = processor.reprocess_single_row(test_row, True)
     print(f"Reprocess result: {success}")
     if success:
         print(f"Updated similarity: {updated_row.get('Similarity %')}")
         print(f"Updated best match: {updated_row.get('Best match')}")
     
-    print(f"\n2. Testing save new product...")
+    print(f"\n2. Testing enhanced save new product...")
     success, message = processor.save_row_as_new_product(
-        test_row, "Custom Category", "Custom Variety", "Custom Color", "Custom Grade", "test_user"
+        test_row, "Custom Category", "Custom Variety", "Custom Color", "Custom Grade", "enhanced_test_user"
     )
     print(f"Save result: {success} - {message}")
     
-    print("\n✅ Row-level processing testing completed!")
+    print(f"\n3. Testing processing statistics...")
+    stats = processor.get_processing_statistics()
+    print(f"Stats: {stats}")
+    
+    print("\n✅ Enhanced row-level processing testing completed!")

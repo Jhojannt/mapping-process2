@@ -43,10 +43,10 @@ from Enhanced_MultiClient_Database import (
     get_client_statistics
 )
 from row_level_processing import (
-    RowLevelProcessor,
-    reprocess_row,
-    save_new_product,
-    update_row_in_main_db
+    EnhancedRowLevelProcessor,
+    enhanced_reprocess_row as reprocess_row,
+    enhanced_save_new_product as save_new_product,
+    enhanced_update_row_in_main_db as update_row_in_main_db
 )
 
 # Configure logging with poetic precision
