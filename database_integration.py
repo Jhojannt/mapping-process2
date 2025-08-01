@@ -26,6 +26,18 @@ class MappingDatabase:
             'connection_timeout': 30,
             'sql_mode': 'STRICT_TRANS_TABLES,NO_ZERO_DATE,NO_ZERO_IN_DATE,ERROR_FOR_DIVISION_BY_ZERO'
         }
+        
+        self.connection_config2 = {
+            'host': os.getenv('DB_HOST', 'http://mapping-process.cjjrhjl6dwxu.us-east-1.rds.amazonaws.com'),
+            'user': os.getenv('DB_USER', 'mapping'),
+            'password': os.getenv('DB_PASSWORD', 'wo0066upzahPfwB4U'),
+            'database': os.getenv('DB_NAME', 'mapping_validation_db'),
+            'charset': 'utf8mb4',
+            'autocommit': True,
+            'connection_timeout': 30,
+            'sql_mode': 'STRICT_TRANS_TABLES,NO_ZERO_DATE,NO_ZERO_IN_DATE,ERROR_FOR_DIVISION_BY_ZERO'
+        }
+        
         self.connection = None
         self.setup_logging()
         

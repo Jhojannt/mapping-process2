@@ -39,6 +39,14 @@ DB_CONFIG = {
     'autocommit': True
 }
 
+DB_CONFIG2 = {
+    'host': os.getenv('DB_HOST', 'http://mapping-process.cjjrhjl6dwxu.us-east-1.rds.amazonaws.com'),
+    'user': os.getenv('DB_USER', 'mapping'),
+    'password': os.getenv('DB_PASSWORD', 'wo0066upzahPfwB4U'),
+    'charset': 'utf8mb4',
+    'autocommit': True
+}
+
 BASE_DATABASE_NAME = os.getenv('BASE_DB_NAME', 'mapping_validation')
 
 def print_banner():
