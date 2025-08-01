@@ -25,7 +25,7 @@ from typing import List, Dict, Any, Tuple, Optional
 from datetime import datetime
 from pathlib import Path
 
-# Import enhanced backend modules
+# Import enhanced backend modules - UPDATED IMPORTS
 from logic import process_files
 from ulits import classify_missing_words
 from storage import save_output_to_disk, load_output_from_disk
@@ -35,8 +35,12 @@ from Enhanced_MultiClient_Database import (
     get_client_staging_products,
     update_client_synonyms_blacklist,
     get_client_synonyms_blacklist,
-    load_client_processed_data,  # Nueva función
-    test_client_database_connection  # Nueva función
+    load_client_processed_data,
+    save_client_processed_data,
+    test_client_database_connection,
+    get_available_clients,
+    verify_client_database_structure,
+    get_client_statistics
 )
 from row_level_processing import (
     RowLevelProcessor,
@@ -142,52 +146,7 @@ def initialize_session_state():
 # Initialize session state
 initialize_session_state()
 
-def load_available_clients() -> List[str]:
-    """Discover the chorus of available clients in the database constellation"""
-    try:
-        # Connect to base configuration to discover client databases
-        import mysql.connector
-        import os
-        
-        connection_config = {
-            'host': os.getenv('DB_HOST', 'localhost'),
-            'user': os.getenv('DB_USER', 'root'),
-            'password': os.getenv('DB_PASSWORD', 'Maracuya123'),
-            'charset': 'utf8mb4',
-            'autocommit': True
-        }
-        
-        connection = mysql.connector.connect(**connection_config)
-        cursor = connection.cursor()
-        
-        # Discover client databases by pattern matching
-        cursor.execute("SHOW DATABASES LIKE 'mapping_validation_%'")
-        databases = cursor.fetchall()
-        
-        clients = []
-        for (db_name,) in databases:
-            if db_name.startswith('mapping_validation_'):
-                client_id = db_name[len('mapping_validation_'):]
-                if client_id and client_id not in ['db', 'test']:  # Exclude base databases
-                    clients.append(client_id)
-        
-        cursor.close()
-        connection.close()
-        
-        # Sort clients alphabetically for consistent presentation
-        clients = sorted(list(set(clients)))
-        st.session_state.available_clients = clients
-        
-        logger.info(f"Discovered {len(clients)} clients: {clients}")
-        return clients
-        
-    except Exception as e:
-        logger.error(f"Error discovering clients: {str(e)}")
-        # Fallback to demo clients if database discovery fails
-        demo_clients = ["demo_client", "test_company", "sample_client"]
-        st.session_state.available_clients = demo_clients
-        return demo_clients
-
+# UPDATED FUNCTION: check_database_connection() USING ENHANCED SYSTEM
 def check_database_connection():
     """Test database connection using enhanced multi-client system"""
     try:
@@ -201,6 +160,51 @@ def check_database_connection():
     except Exception as e:
         st.session_state.db_connection_status = f"error: {str(e)}"
         return False
+
+# UPDATED FUNCTION: load_processed_data_from_database() FOR ENHANCED SYSTEM
+def load_processed_data_from_database():
+    """Load processed data using enhanced multi-client system"""
+    if not st.session_state.current_client_id:
+        return None
+    
+    try:
+        # Use the new client-specific function
+        df = load_client_processed_data(st.session_state.current_client_id)
+        
+        if df is not None and len(df) > 0:
+            print(f"✅ Loaded {len(df)} records for client {st.session_state.current_client_id}")
+            return df
+        else:
+            print(f"⚠️ No records found for client {st.session_state.current_client_id}")
+            return None
+            
+    except Exception as e:
+        print(f"❌ Error loading data for client {st.session_state.current_client_id}: {str(e)}")
+        return None
+
+# NEW FUNCTION: save_processed_data_to_database() FOR ENHANCED SYSTEM
+def save_processed_data_to_database(df):
+    """Save processed DataFrame to client-specific database"""
+    if not st.session_state.current_client_id:
+        return False, "No client selected"
+    
+    if df is None or len(df) == 0:
+        return False, "No data to save"
+    
+    try:
+        # Generate batch_id único
+        batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        
+        success, message = save_client_processed_data(
+            st.session_state.current_client_id, 
+            df, 
+            batch_id
+        )
+        
+        return success, message
+        
+    except Exception as e:
+        return False, f"Error saving to database: {str(e)}"
 
 def database_status_widget():
     """Display database connection status widget with enhanced styling"""
@@ -450,85 +454,6 @@ def apply_custom_css():
     """
     st.markdown(css, unsafe_allow_html=True)
 
-def load_processed_data_from_database():
-    """Load processed data from the enhanced multi-client database based on current client"""
-    if not st.session_state.current_client_id:
-        return None
-    
-    try:
-        # Use the enhanced multi-client database system
-        db = EnhancedMultiClientDatabase(st.session_state.current_client_id)
-        
-        # Connect to the client-specific main database
-        if not db.connect_to_database("main"):
-            logger.error(f"Failed to connect to main database for client {st.session_state.current_client_id}")
-            return None
-        
-        # Query the client-specific processed_mappings table
-        import mysql.connector
-        config = db.connection_config.copy()
-        config['database'] = db.get_client_database_name("main")
-        
-        connection = mysql.connector.connect(**config)
-        cursor = connection.cursor(dictionary=True)
-        
-        # Get all processed mappings for this client
-        query = """
-        SELECT 
-            vendor_product_description as 'Vendor Product Description',
-            company_location as 'Company Location',
-            vendor_name as 'Vendor Name',
-            vendor_id as 'Vendor ID',
-            quantity as 'Quantity',
-            stems_bunch as 'Stems / Bunch',
-            unit_type as 'Unit Type',
-            staging_id as 'Staging ID',
-            object_mapping_id as 'Object Mapping ID',
-            company_id as 'Company ID',
-            user_id as 'User ID',
-            product_mapping_id as 'Product Mapping ID',
-            email as 'Email',
-            cleaned_input as 'Cleaned input',
-            applied_synonyms as 'Applied Synonyms',
-            removed_blacklist_words as 'Removed Blacklist Words',
-            best_match as 'Best match',
-            similarity_percentage as 'Similarity %',
-            matched_words as 'Matched Words',
-            missing_words as 'Missing Words',
-            catalog_id as 'Catalog ID',
-            categoria as 'Categoria',
-            variedad as 'Variedad',
-            color as 'Color',
-            grado as 'Grado',
-            accept_map as 'Accept Map',
-            deny_map as 'Deny Map',
-            action as 'Action',
-            word as 'Word',
-            created_at,
-            updated_at
-        FROM processed_mappings 
-        WHERE client_id = %s
-        ORDER BY created_at DESC
-        """
-        
-        cursor.execute(query, (st.session_state.current_client_id,))
-        results = cursor.fetchall()
-        
-        cursor.close()
-        connection.close()
-        
-        if results:
-            df = pd.DataFrame(results)
-            logger.info(f"Retrieved {len(df)} records from database for client {st.session_state.current_client_id}")
-            return df
-        else:
-            logger.info(f"No records found for client {st.session_state.current_client_id}")
-            return None
-            
-    except Exception as e:
-        logger.error(f"Error loading data for client {st.session_state.current_client_id}: {str(e)}")
-        return None
-
 def safe_float_conversion(series, default_value=0):
     """Safely convert pandas series to float with proper error handling"""
     try:
@@ -542,7 +467,7 @@ def safe_float_conversion(series, default_value=0):
         # Return series of default values with same index
         return pd.Series([default_value] * len(series), index=series.index)
 
-
+# UPDATED FUNCTION: Enhanced sidebar_controls() with new features
 def sidebar_controls():
     """Enhanced sidebar with all controls and database integration"""
     st.sidebar.header("📁 File Upload & Database")
@@ -558,12 +483,13 @@ def sidebar_controls():
                 check_database_connection()
             st.rerun()
     
+    # UPDATED: Load from DB button using enhanced system
     with col2:
         if st.button("📊 Load from DB", use_container_width=True):
             if st.session_state.current_client_id:
                 try:
                     with st.spinner(f"Loading data for client {st.session_state.current_client_id}..."):
-                        # Usar la función específica del cliente
+                        # Use the client-specific function
                         db_data = load_processed_data_from_database()
                         if db_data is not None and len(db_data) > 0:
                             st.session_state.processed_data = db_data
@@ -578,13 +504,40 @@ def sidebar_controls():
                     st.sidebar.info("💡 Try creating databases for this client first")
             else:
                 st.sidebar.error("❌ Please select a client first")
+    
+    # NEW: Diagnose Client DB button
+    if st.sidebar.button("🔍 Diagnose Client DB"):
+        if st.session_state.current_client_id:
+            with st.spinner("Diagnosing client database structure..."):
+                try:
+                    success, results = verify_client_database_structure(st.session_state.current_client_id)
+                    
+                    if success:
+                        st.sidebar.success("✅ All client databases OK")
+                    else:
+                        st.sidebar.error("❌ Database issues found")
+                    
+                    # Show details in expander
+                    with st.sidebar.expander("📊 Database Details"):
+                        for db_type, status in results.items():
+                            if "✅" in status:
+                                st.success(f"{db_type}: {status}")
+                            else:
+                                st.error(f"{db_type}: {status}")
+                                
+                except Exception as e:
+                    st.sidebar.error(f"❌ Diagnosis failed: {str(e)}")
+        else:
+            st.sidebar.error("❌ Select a client first")
         
     st.sidebar.divider()
     
-    # Client selection
+    # Client selection with enhanced client loading
     st.sidebar.header("🏢 Client Management")
     
-    available_clients = load_available_clients()
+    # Load available clients using enhanced system
+    available_clients = get_available_clients()
+    st.session_state.available_clients = available_clients
     
     if available_clients:
         client_options = ["-- Select Client --"] + available_clients
@@ -620,7 +573,8 @@ def sidebar_controls():
     
     with col2:
         if st.button("🔄 Refresh", use_container_width=True):
-            load_available_clients()
+            available_clients = get_available_clients()
+            st.session_state.available_clients = available_clients
             st.rerun()
     
     # Display current client status
@@ -800,7 +754,8 @@ def create_client_setup_modal():
                             st.session_state.current_client_id = new_client_id
                             st.session_state.new_client_id = ''
                             st.session_state.show_client_setup = False
-                            load_available_clients()
+                            # Refresh available clients
+                            st.session_state.available_clients = get_available_clients()
                             time.sleep(1)
                             st.rerun()
                         else:
@@ -1224,6 +1179,56 @@ def create_streamlit_table_with_actions(df):
         
         # Add a subtle separator between rows
         st.markdown("<hr style='margin: 10px 0; border: 1px solid #eee;'>", unsafe_allow_html=True)
+    
+    # NEW SECTION: Database Operations with enhanced buttons
+    st.markdown("---")
+    st.markdown("### 💾 Database Operations")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        if st.button("💾 Save All to Database", type="primary", use_container_width=True):
+            if st.session_state.processed_data is not None:
+                with st.spinner("Saving to database..."):
+                    success, message = save_processed_data_to_database(st.session_state.processed_data)
+                    
+                    if success:
+                        st.success(f"✅ {message}")
+                    else:
+                        st.error(f"❌ {message}")
+            else:
+                st.error("❌ No data to save")
+
+    with col2:
+        if st.button("🔄 Reload from Database", use_container_width=True):
+            if st.session_state.current_client_id:
+                with st.spinner("Reloading from database..."):
+                    db_data = load_processed_data_from_database()
+                    if db_data is not None:
+                        st.session_state.processed_data = db_data
+                        st.session_state.total_rows = len(db_data)
+                        st.success(f"✅ Reloaded {len(db_data)} records")
+                        st.rerun()
+                    else:
+                        st.warning("⚠️ No data found in database")
+            else:
+                st.error("❌ No client selected")
+
+    with col3:
+        # Show database statistics
+        if st.button("📊 Show DB Stats", use_container_width=True):
+            if st.session_state.current_client_id:
+                try:
+                    stats = get_client_statistics(st.session_state.current_client_id)
+                    
+                    if 'error' not in stats:
+                        st.json(stats['main_stats'])
+                    else:
+                        st.error(f"❌ {stats['error']}")
+                except Exception as e:
+                    st.error(f"❌ Error getting stats: {str(e)}")
+            else:
+                st.error("❌ No client selected")
 
 def mark_all_accept(filtered_df):
     """Mark all visible rows as Accept and clear Deny"""
@@ -1289,6 +1294,56 @@ def main():
     # Display contextual messages
     display_messages()
     
+    # NEW FEATURE: Enhanced tabs for different functionality
+    if st.session_state.current_client_id:
+        tab1, tab2, tab3 = st.tabs(["📊 Data Mapping", "🆕 Staging Products", "📝 Synonyms & Blacklist"])
+        
+        with tab1:
+            # Original data mapping functionality
+            data_mapping_tab()
+        
+        with tab2:
+            # NEW TAB: Staging Products
+            staging_products_tab()
+        
+        with tab3:
+            # NEW TAB: Synonyms & Blacklist Management
+            synonyms_blacklist_tab()
+    else:
+        # Sidebar controls
+        search_text, min_sim, max_sim, filter_column, filter_value = sidebar_controls()
+        
+        # Instructions for new users
+        st.info("👆 **Get Started:** Select a client using the sidebar")
+        
+        with st.expander("📖 **Enhanced Features Guide**"):
+            st.markdown("""
+            ### 🚀 **Getting Started:**
+            
+            1. **Select Client** → Use sidebar to choose existing or create new client
+            2. **Load Data** → Either upload files or load from database
+            3. **Review Data** → Use enhanced filtering and row-level actions
+            4. **Edit Products** → Click edit button to modify and save products
+            5. **Bulk Actions** → Use bulk operations for efficient workflow
+            
+            ### 🔧 **Enhanced Features:**
+            - ✅ **Row-level Processing** - Individual row reprocessing with updated synonyms
+            - ✅ **Enhanced Filtering** - Advanced search and exclusion capabilities
+            - ✅ **Product Staging** - Save new products with catalog_id: 111111
+            - ✅ **Real-time Updates** - Immediate feedback and validation
+            - ✅ **Client Isolation** - Complete data separation per client
+            - ✅ **Liquid Progress Bars** - Beautiful animated progress tracking
+            - ✅ **Database Integration** - Full CRUD operations with enhanced database
+            
+            ### 📊 **Data Processing:**
+            - **Similarity Calculation** - Advanced fuzzy matching algorithms
+            - **Synonyms Application** - Dynamic text replacement
+            - **Blacklist Filtering** - Intelligent word removal
+            - **Progress Tracking** - Real-time processing feedback
+            """)
+
+def data_mapping_tab():
+    """Main data mapping functionality tab"""
     # Sidebar controls
     search_text, min_sim, max_sim, filter_column, filter_value = sidebar_controls()
     
@@ -1402,32 +1457,212 @@ def main():
     else:
         # Instructions for new users
         st.info("👆 **Get Started:** Upload your files using the sidebar or load existing data from database")
-        
-        with st.expander("📖 **Enhanced Features Guide**"):
-            st.markdown("""
-            ### 🚀 **Getting Started:**
+
+def staging_products_tab():
+    """NEW TAB: Staging Products to Create"""
+    st.header("🆕 Staging Products to Create")
+    
+    if st.session_state.current_client_id:
+        try:
+            # Use client-specific function
+            staging_df = get_client_staging_products(st.session_state.current_client_id)
             
-            1. **Select Client** → Use sidebar to choose existing or create new client
-            2. **Load Data** → Either upload files or load from database
-            3. **Review Data** → Use enhanced filtering and row-level actions
-            4. **Edit Products** → Click edit button to modify and save products
-            5. **Bulk Actions** → Use bulk operations for efficient workflow
+            if staging_df is not None and len(staging_df) > 0:
+                st.write(f"**Staging Products for {st.session_state.current_client_id}:** {len(staging_df)}")
+                
+                # Show statistics
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    pending_count = len(staging_df[staging_df['status'] == 'pending']) if 'status' in staging_df.columns else len(staging_df)
+                    st.metric("⏳ Pending", pending_count)
+                with col2:
+                    approved_count = len(staging_df[staging_df['status'] == 'approved']) if 'status' in staging_df.columns else 0
+                    st.metric("✅ Approved", approved_count)
+                with col3:
+                    total_count = len(staging_df)
+                    st.metric("📊 Total", total_count)
+                
+                # Show table with filters
+                st.subheader("📋 Products List")
+                
+                # Filter by status
+                if 'status' in staging_df.columns:
+                    status_filter = st.selectbox(
+                        "Filter by Status:",
+                        ["All", "pending", "approved", "rejected"],
+                        key="staging_status_filter"
+                    )
+                    
+                    if status_filter != "All":
+                        display_df = staging_df[staging_df['status'] == status_filter]
+                    else:
+                        display_df = staging_df
+                else:
+                    display_df = staging_df
+                
+                # Show table
+                st.dataframe(display_df, use_container_width=True)
+                
+                # Download button
+                if len(display_df) > 0:
+                    csv_data = display_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Staging Products CSV",
+                        data=csv_data,
+                        file_name=f"staging_products_{st.session_state.current_client_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                
+            else:
+                st.info(f"No staging products found for client **{st.session_state.current_client_id}**")
+                
+                # Button to create test staging product
+                if st.button("🧪 Create Test Staging Product"):
+                    try:
+                        from Enhanced_MultiClient_Database import save_new_product_to_staging
+                        success, message = save_new_product_to_staging(
+                            st.session_state.current_client_id,
+                            "Test Category", "Test Variety", "Test Color", "Test Grade",
+                            1, "test product for staging", "streamlit_user"
+                        )
+                        
+                        if success:
+                            st.success(f"✅ {message}")
+                            st.rerun()
+                        else:
+                            st.error(f"❌ {message}")
+                    except Exception as e:
+                        st.error(f"❌ Error creating test product: {str(e)}")
+                        
+        except Exception as e:
+            st.error(f"❌ Error loading staging products: {str(e)}")
+            st.info("💡 Make sure the client databases are created")
+    else:
+        st.warning("⚠️ Please select a client to view staging products")
+
+def synonyms_blacklist_tab():
+    """NEW TAB: Synonyms & Blacklist Management"""
+    st.header("📝 Synonyms & Blacklist Management")
+    
+    if st.session_state.current_client_id:
+        try:
+            # Load current data
+            current_data = get_client_synonyms_blacklist(st.session_state.current_client_id)
             
-            ### 🔧 **Enhanced Features:**
-            - ✅ **Row-level Processing** - Individual row reprocessing with updated synonyms
-            - ✅ **Enhanced Filtering** - Advanced search and exclusion capabilities
-            - ✅ **Product Staging** - Save new products with catalog_id: 111111
-            - ✅ **Real-time Updates** - Immediate feedback and validation
-            - ✅ **Client Isolation** - Complete data separation per client
-            - ✅ **Liquid Progress Bars** - Beautiful animated progress tracking
-            - ✅ **Database Integration** - Full CRUD operations with enhanced database
+            # Show statistics
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("🔁 Synonyms", len(current_data.get('synonyms', {})))
+            with col2:
+                st.metric("🛑 Blacklist", len(current_data.get('blacklist', {}).get('input', [])))
             
-            ### 📊 **Data Processing:**
-            - **Similarity Calculation** - Advanced fuzzy matching algorithms
-            - **Synonyms Application** - Dynamic text replacement
-            - **Blacklist Filtering** - Intelligent word removal
-            - **Progress Tracking** - Real-time processing feedback
-            """)
+            # Create sub-tabs for view and edit
+            view_tab, edit_tab = st.tabs(["👀 View Current", "✏️ Edit & Update"])
+            
+            with view_tab:
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.subheader("🔁 Current Synonyms")
+                    if current_data['synonyms']:
+                        for original, replacement in current_data['synonyms'].items():
+                            st.write(f"• `{original}` → `{replacement}`")
+                    else:
+                        st.info("No synonyms configured for this client")
+                
+                with col2:
+                    st.subheader("🛑 Current Blacklist")
+                    if current_data['blacklist']['input']:
+                        for word in current_data['blacklist']['input']:
+                            st.write(f"• `{word}`")
+                    else:
+                        st.info("No blacklist words configured for this client")
+            
+            with edit_tab:
+                st.subheader("➕ Add New Synonym")
+                
+                col1, col2, col3 = st.columns([2, 2, 1])
+                with col1:
+                    original_word = st.text_input("Original Word:", key="new_synonym_original")
+                with col2:
+                    replacement_word = st.text_input("Replacement Word:", key="new_synonym_replacement")
+                with col3:
+                    if st.button("➕ Add Synonym", key="add_synonym_btn"):
+                        if original_word and replacement_word:
+                            # Add to existing synonyms
+                            new_synonyms = current_data['synonyms'].copy()
+                            new_synonyms[original_word] = replacement_word
+                            
+                            # Convert to required format
+                            synonyms_list = [{k: v} for k, v in new_synonyms.items()]
+                            
+                            success, message = update_client_synonyms_blacklist(
+                                st.session_state.current_client_id,
+                                synonyms_list,
+                                current_data['blacklist']['input']
+                            )
+                            
+                            if success:
+                                st.success(f"✅ Synonym added: {original_word} → {replacement_word}")
+                                st.rerun()
+                            else:
+                                st.error(f"❌ {message}")
+                        else:
+                            st.error("Please enter both original and replacement words")
+                
+                st.subheader("➕ Add New Blacklist Word")
+                
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    blacklist_word = st.text_input("Blacklist Word:", key="new_blacklist_word")
+                with col2:
+                    if st.button("➕ Add Word", key="add_blacklist_btn"):
+                        if blacklist_word:
+                            # Add to existing blacklist
+                            new_blacklist = current_data['blacklist']['input'].copy()
+                            if blacklist_word not in new_blacklist:
+                                new_blacklist.append(blacklist_word)
+                                
+                                # Convert synonyms to required format
+                                synonyms_list = [{k: v} for k, v in current_data['synonyms'].items()]
+                                
+                                success, message = update_client_synonyms_blacklist(
+                                    st.session_state.current_client_id,
+                                    synonyms_list,
+                                    new_blacklist
+                                )
+                                
+                                if success:
+                                    st.success(f"✅ Blacklist word added: {blacklist_word}")
+                                    st.rerun()
+                                else:
+                                    st.error(f"❌ {message}")
+                            else:
+                                st.warning("Word already in blacklist")
+                        else:
+                            st.error("Please enter a word")
+                
+                # Button to clear all
+                st.divider()
+                if st.button("🗑️ Clear All Synonyms & Blacklist", type="secondary"):
+                    success, message = update_client_synonyms_blacklist(
+                        st.session_state.current_client_id, [], []
+                    )
+                    
+                    if success:
+                        st.success("✅ All synonyms and blacklist cleared")
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {message}")
+                        
+        except Exception as e:
+            st.error(f"❌ Error managing synonyms/blacklist: {str(e)}")
+            st.info("💡 Make sure the client databases are created")
+    else:
+        st.warning("⚠️ Please select a client to manage synonyms and blacklist")
 
 if __name__ == "__main__":
     main()
+    
+    
